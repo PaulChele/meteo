@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>Météo</title>
+<style>
+  :root { --bg:#fff; --fg:#111; --mute:#777; --line:#111; --soft:#ddd; --rain:#0a58ca; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#000; --fg:#f2f2f2; --mute:#8a8a8a; --line:#f2f2f2; --soft:#2a2a2a; --rain:#6ea8fe; }
+    meta[name=theme-color]{content:#000}
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    padding:max(20px,env(safe-area-inset-top)) 20px max(32px,env(safe-area-inset-bottom));
+    max-width:560px; margin:0 auto; }
+  .label { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--mute); font-weight:600; }
+  header { display:flex; justify-content:space-between; align-items:baseline; padding-bottom:12px; border-bottom:2px solid var(--line); }
+  .now { padding:28px 0 24px; border-bottom:1px solid var(--soft); }
+  .temp { font-size:112px; font-weight:800; letter-spacing:-.05em; line-height:.95; }
+  .temp sup { font-size:40px; font-weight:700; vertical-align:top; position:relative; top:12px; letter-spacing:0; }
+  .cond { font-size:22px; font-weight:600; margin-top:10px; }
+  .feels { color:var(--mute); font-size:15px; margin-top:4px; }
+  .verdict { padding:20px 0; border-bottom:2px solid var(--line); font-size:22px; font-weight:700; line-height:1.25; }
+  .verdict.rain { color:var(--rain); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; }
+  .cell { padding:16px 0; border-bottom:1px solid var(--soft); }
+  .cell:nth-child(odd){ padding-right:12px; }
+  .cell:nth-child(even){ padding-left:12px; border-left:1px solid var(--soft); }
+  .big { font-size:34px; font-weight:800; letter-spacing:-.03em; margin-top:4px; }
+  .big small { font-size:16px; font-weight:600; color:var(--mute); letter-spacing:0; }
+  .hours { margin-top:24px; }
+  .hours .label { padding-bottom:8px; border-bottom:2px solid var(--line); }
+  .row { display:grid; grid-template-columns:52px 1fr 52px 56px; align-items:center; padding:9px 0; border-bottom:1px solid var(--soft); font-size:16px; }
+  .row.past { opacity:.35; }
+  .row.cur { font-weight:800; }
+  .row .h { color:var(--mute); font-variant-numeric:tabular-nums; }
+  .row .t { text-align:right; font-weight:700; font-variant-numeric:tabular-nums; }
+  .row .p { text-align:right; font-size:14px; color:var(--mute); font-variant-numeric:tabular-nums; }
+  .row .p.wet { color:var(--rain); font-weight:700; }
+  .bar { height:6px; background:var(--soft); margin:0 12px; position:relative; }
+  .bar i { position:absolute; left:0; top:0; bottom:0; background:var(--rain); }
+  footer { margin-top:20px; font-size:12px; color:var(--mute); display:flex; justify-content:space-between; }
+  .err { padding:24px 0; color:var(--mute); }
+</style>
+</head>
+<body>
+<header>
+  <span class="label" id="place">Madrid · La Guindalera</span>
+  <span class="label" id="date"></span>
+</header>
+<main id="app"><p class="err">Chargement de la météo…</p></main>
+<footer><span id="upd"></span><span>Open-Meteo</span></footer>
+
+<script>
+// ====== CONFIG ======
+const LAT = 40.4400, LON = -3.6700;      // La Guindalera, Madrid
+const RAIN_THRESHOLD = 40;               // % à partir duquel on parle de pluie
+// ====================
+
+const URL_API = "https://api.open-meteo.com/v1/forecast"
+  + "?latitude=" + LAT + "&longitude=" + LON
+  + "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,precipitation"
+  + "&hourly=temperature_2m,precipitation_probability,precipitation,weather_code"
+  + "&daily=temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_probability_max,precipitation_sum,sunrise,sunset,uv_index_max,wind_speed_10m_max"
+  + "&timezone=Europe%2FMadrid&forecast_days=1&wind_speed_unit=kmh";
+
+const WMO = {
+  0:"Ciel dégagé",1:"Plutôt dégagé",2:"Partiellement nuageux",3:"Couvert",
+  45:"Brouillard",48:"Brouillard givrant",
+  51:"Bruine légère",53:"Bruine",55:"Bruine dense",56:"Bruine verglaçante",57:"Bruine verglaçante",
+  61:"Pluie faible",63:"Pluie",65:"Pluie forte",66:"Pluie verglaçante",67:"Pluie verglaçante",
+  71:"Neige faible",73:"Neige",75:"Neige forte",77:"Grains de neige",
+  80:"Averses faibles",81:"Averses",82:"Averses violentes",85:"Averses de neige",86:"Averses de neige",
+  95:"Orage",96:"Orage et grêle",99:"Orage et grêle"
+};
+
+const $ = id => document.getElementById(id);
+const r = n => Math.round(n);
+const hh = s => s.slice(11,16);
+
+function save(d){ try{ localStorage.setItem("meteo", JSON.stringify({d, t:Date.now()})); }catch(e){} }
+function load(){ try{ return JSON.parse(localStorage.getItem("meteo")); }catch(e){ return null; } }
+
+function verdict(d, nowH){
+  const h = d.hourly, day = d.daily;
+  const wet = [];
+  for(let i = nowH; i < 24; i++){
+    if(h.precipitation_probability[i] >= RAIN_THRESHOLD || h.precipitation[i] >= 0.3) wet.push(i);
+  }
+  const code = d.current.weather_code;
+  const rainingNow = d.current.precipitation > 0.1;
+  if(rainingNow) return {txt:"Il pleut en ce moment.", rain:true};
+  if(!wet.length){
+    const mx = day.precipitation_probability_max[0];
+    return {txt: mx >= 20 ? "Probablement sec, petit risque d'averse ("+mx+" %)." : "Pas de pluie prévue aujourd'hui.", rain:false};
+  }
+  const start = wet[0], end = wet[wet.length-1];
+  const f = x => x + " h";
+  const txt = start === end ? "Pluie possible vers " + f(start) + "."
+            : "Pluie probable entre " + f(start) + " et " + f(end+1) + ".";
+  return {txt: "Prends un parapluie. " + txt, rain:true};
+}
+
+function render(d, stamp){
+  const now = new Date();
+  const nowH = Number(new Intl.DateTimeFormat("fr-FR",{hour:"numeric",hour12:false,timeZone:"Europe/Madrid"}).format(now)) % 24;
+  const c = d.current, day = d.daily, h = d.hourly;
+  const v = verdict(d, nowH);
+
+  $("date").textContent = new Intl.DateTimeFormat("fr-FR",{weekday:"long",day:"numeric",month:"long",timeZone:"Europe/Madrid"}).format(now);
+
+  let rows = "";
+  for(let i = 0; i < 24; i++){
+    const p = h.precipitation_probability[i] ?? 0;
+    const cls = "row" + (i < nowH ? " past" : "") + (i === nowH ? " cur" : "");
+    rows += '<div class="'+cls+'"><span class="h">'+String(i).padStart(2,"0")+' h</span>'
+      + '<div class="bar"><i style="width:'+p+'%"></i></div>'
+      + '<span class="p'+(p>=RAIN_THRESHOLD?" wet":"")+'">'+p+' %</span>'
+      + '<span class="t">'+r(h.temperature_2m[i])+'°</span></div>';
+  }
+
+  $("app").innerHTML =
+    '<section class="now">'
+      + '<div class="label">Maintenant</div>'
+      + '<div class="temp">'+r(c.temperature_2m)+'<sup>°</sup></div>'
+      + '<div class="cond">'+(WMO[c.weather_code]||"—")+'</div>'
+      + '<div class="feels">Ressenti '+r(c.apparent_temperature)+'° · Vent '+r(c.wind_speed_10m)+' km/h</div>'
+    + '</section>'
+    + '<section class="verdict'+(v.rain?" rain":"")+'">'+v.txt+'</section>'
+    + '<section class="grid">'
+      + '<div class="cell"><div class="label">Min</div><div class="big">'+r(day.temperature_2m_min[0])+'<small>°</small></div></div>'
+      + '<div class="cell"><div class="label">Max</div><div class="big">'+r(day.temperature_2m_max[0])+'<small>°</small></div></div>'
+      + '<div class="cell"><div class="label">Pluie (max)</div><div class="big">'+day.precipitation_probability_max[0]+'<small> %</small></div></div>'
+      + '<div class="cell"><div class="label">Cumul</div><div class="big">'+(Math.round(day.precipitation_sum[0]*10)/10)+'<small> mm</small></div></div>'
+      + '<div class="cell"><div class="label">UV max</div><div class="big">'+r(day.uv_index_max[0])+'</div></div>'
+      + '<div class="cell"><div class="label">Soleil</div><div class="big" style="font-size:22px;margin-top:10px">'+hh(day.sunrise[0])+' → '+hh(day.sunset[0])+'</div></div>'
+    + '</section>'
+    + '<section class="hours"><div class="label">Heure par heure · risque de pluie · température</div>'+rows+'</section>';
+
+  $("upd").textContent = "Mis à jour " + new Date(stamp).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"});
+}
+
+async function go(){
+  try{
+    const res = await fetch(URL_API, {cache:"no-store"});
+    if(!res.ok) throw new Error(res.status);
+    const d = await res.json();
+    save(d);
+    render(d, Date.now());
+  }catch(e){
+    const s = load();
+    if(s){ render(s.d, s.t); $("upd").textContent += " (hors ligne)"; }
+    else $("app").innerHTML = '<p class="err">Impossible de récupérer la météo. Réessaie dans un instant.</p>';
+  }
+}
+
+go();
+document.addEventListener("visibilitychange", () => { if(!document.hidden) go(); });
+</script>
+</body>
+</html>
